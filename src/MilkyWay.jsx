@@ -1,6 +1,5 @@
 import React, { useRef, useEffect, useState } from "react";
 import * as THREE from "three";
-import * as Tone from "tone";
 
 // ═══ MILKY WAY · ULTIMATE ═══
 // Everything from the live model, plus:
@@ -302,6 +301,17 @@ const POIS = [
   { id: "lmc", name: "Magellanic Clouds", blurb: "Two dwarf satellites, 160–200 thousand ly away, slowly being pulled apart by our gravity. From Johannesburg you can see them on any clear night.", target: [21.5, -8, 13.5], dist: 13, phi: 1.1 },
 ];
 
+function useNarrow(query = "(max-width: 600px)") {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setNarrow(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return narrow;
+}
+
 export default function MilkyWay() {
   const mountRef = useRef(null);
   const labelRef = useRef(null);
@@ -314,17 +324,22 @@ export default function MilkyWay() {
   const [activePoi, setActivePoi] = useState(null);
   const [mode, setMode] = useState("orbit");
   const [soundOn, setSoundOn] = useState(false);
+  const narrow = useNarrow();
 
   useEffect(() => {
     const mount = mountRef.current;
     const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (prefersReduced) { speedRef.current = 0; }
+    if (prefersReduced) { speedRef.current = 0; setSpeedUi(0); }
+    let raf, simTime = 0, rotPhase = 0;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#020107");
     const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 0.02, 600);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // gl_PointSize is in device pixels — scale by the pixel ratio so sprites
+    // are the same on-screen size on standard and high-DPI displays
+    const dpr = renderer.getPixelRatio();
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
 
@@ -337,8 +352,8 @@ export default function MilkyWay() {
           uTex: { value: tex },
           uTime: { value: 0 },
           uRot: { value: 0 },
-          uPointScale: { value: 190 },
-          uMaxPoint: { value: 64 },
+          uPointScale: { value: 95 * dpr },
+          uMaxPoint: { value: 32 * dpr },
           uTwinkle: { value: opts.twinkle || 0 },
           uOpacity: { value: opts.opacity ?? 1 },
         },
@@ -353,7 +368,7 @@ export default function MilkyWay() {
 
     const mats = [
       layer(buildHaze(), FRAG_ADD, THREE.AdditiveBlending, 0),
-      layer(buildStars(), FRAG_ADD, THREE.AdditiveBlending, 1, { twinkle: 1 }),
+      layer(buildStars(), FRAG_ADD, THREE.AdditiveBlending, 1, { twinkle: prefersReduced ? 0 : 1 }),
       layer(buildDust(), FRAG_DUST, THREE.NormalBlending, 2, { opacity: 0.4 }),
     ];
     const dustMat = mats[2];
@@ -399,17 +414,17 @@ export default function MilkyWay() {
     }
     let nextNova = 2;
 
-    function spawnNova(now, rotPhase) {
+    function spawnNova(now) {
       const slot = novas.find((n) => !n.active);
       if (!slot) return;
       const armIdx = Math.floor(Math.random() * 4);
       const phases = [0, Math.PI, Math.PI * 0.5, Math.PI * 1.5];
       const p = armPoint(phases[armIdx], 0.25 + Math.random() * 0.65, 0.7);
-      const omega = 1 / Math.max(p.r, 0.9);
-      // store the angle as if rotPhase were zero, so it co-rotates with the disc
-      const visAng = Math.atan2(p.z, p.x);
+      // armPoint gives the un-rotated position, the same frame the star
+      // buffers live in, so applying the shader's rotation later keeps the
+      // nova sitting on the (possibly wound-up) arm it was born in
       slot.r = p.r;
-      slot.baseAng = visAng + omega * rotPhase;
+      slot.baseAng = Math.atan2(p.z, p.x);
       slot.y = gauss() * 0.12;
       slot.born = now;
       slot.active = true;
@@ -449,11 +464,13 @@ export default function MilkyWay() {
     }
 
     const lookDir = new THREE.Vector3();
+    const eyeOffset = new THREE.Vector3(0, 0.025, 0);
+    const lookAt = new THREE.Vector3();
     function applySkyCamera(dt) {
       const k = 1 - Math.exp(-dt * 4);
       sky.fov += (sky.desFov - sky.fov) * k;
       sky.pitch = Math.max(-1.45, Math.min(1.45, sky.pitch));
-      camera.position.copy(sun.position).add(new THREE.Vector3(0, 0.025, 0));
+      camera.position.copy(sun.position).add(eyeOffset);
       lookDir.set(
         Math.cos(sky.pitch) * Math.cos(sky.yaw),
         Math.sin(sky.pitch),
@@ -461,11 +478,11 @@ export default function MilkyWay() {
       );
       camera.fov = sky.fov;
       camera.updateProjectionMatrix();
-      camera.lookAt(camera.position.clone().add(lookDir));
+      camera.lookAt(lookAt.copy(camera.position).add(lookDir));
     }
 
     function setMaxPoint(v) {
-      for (const m of mats) m.uniforms.uMaxPoint.value = v;
+      for (const m of mats) m.uniforms.uMaxPoint.value = v * dpr;
     }
 
     function clearFocus() { poiRef.current = null; setActivePoi(null); }
@@ -512,7 +529,7 @@ export default function MilkyWay() {
         sky.fov = 95; sky.desFov = 70;
         sun.visible = false;
         orbitRing.visible = false;
-        setMaxPoint(10);
+        setMaxPoint(5);
         dustMat.uniforms.uOpacity.value = 0.3;
       },
       exitSky() {
@@ -520,7 +537,7 @@ export default function MilkyWay() {
         setMode("orbit");
         sun.visible = true;
         orbitRing.visible = true;
-        setMaxPoint(64);
+        setMaxPoint(32);
         dustMat.uniforms.uOpacity.value = 0.4;
         cur.target.copy(sun.position);
         cur.dist = 4; cur.phi = 1.0; cur.theta = sky.yaw + Math.PI;
@@ -528,8 +545,11 @@ export default function MilkyWay() {
       },
       async toggleSound() {
         const a = audioRef.current;
+        if (a.busy) return;
         if (!a.on) {
+          a.busy = true;
           try {
+            const Tone = await import("tone");
             await Tone.start();
             if (!a.nodes) {
               const vol = new Tone.Volume(-24).toDestination();
@@ -549,6 +569,7 @@ export default function MilkyWay() {
             }
             a.on = true; setSoundOn(true);
           } catch (e) { console.error("Audio failed:", e); }
+          a.busy = false;
         } else {
           try { a.nodes.d1.stop(); a.nodes.d2.stop(); } catch (e) {}
           a.on = false; setSoundOn(false);
@@ -558,9 +579,16 @@ export default function MilkyWay() {
 
     const el = renderer.domElement;
     el.style.touchAction = "none";
-    const down = (e) => { state.drag = true; state.lx = e.clientX; state.ly = e.clientY; el.setPointerCapture && el.setPointerCapture(e.pointerId); };
+    const pointers = new Set();
+    const down = (e) => {
+      pointers.add(e.pointerId);
+      // a second finger means pinch — stop dragging so the view doesn't jump
+      state.drag = pointers.size === 1;
+      state.lx = e.clientX; state.ly = e.clientY;
+      el.setPointerCapture && el.setPointerCapture(e.pointerId);
+    };
     const move = (e) => {
-      if (!state.drag) return;
+      if (!state.drag || !pointers.has(e.pointerId)) return;
       const dx = e.clientX - state.lx, dy = e.clientY - state.ly;
       state.lx = e.clientX; state.ly = e.clientY;
       if (modeRef.current === "sky") {
@@ -571,7 +599,7 @@ export default function MilkyWay() {
         des.phi -= dy * 0.005;
       }
     };
-    const up = () => { state.drag = false; };
+    const up = (e) => { pointers.delete(e.pointerId); state.drag = false; };
     const wheel = (e) => {
       e.preventDefault();
       if (modeRef.current === "sky") sky.desFov = Math.max(28, Math.min(100, sky.desFov * (1 + Math.sign(e.deltaY) * 0.08)));
@@ -600,13 +628,14 @@ export default function MilkyWay() {
     el.addEventListener("touchend", tEnd);
 
     const onResize = () => {
+      if (!mount.clientWidth || !mount.clientHeight) return;
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
     };
-    window.addEventListener("resize", onResize);
+    const resizeObs = new ResizeObserver(onResize);
+    resizeObs.observe(mount);
 
-    let raf, simTime = 0, rotPhase = 0;
     const clock = new THREE.Clock();
     const proj = new THREE.Vector3();
 
@@ -628,7 +657,7 @@ export default function MilkyWay() {
 
       // supernovae — rate scales with how fast time is running
       if (speedRef.current > 0.05 && simTime > nextNova) {
-        spawnNova(simTime, rotPhase);
+        spawnNova(simTime);
         nextNova = simTime + (2 + Math.random() * 4) / Math.max(speedRef.current * 0.4, 0.08);
       }
       for (const n of novas) {
@@ -672,7 +701,7 @@ export default function MilkyWay() {
 
     return () => {
       cancelAnimationFrame(raf);
-      window.removeEventListener("resize", onResize);
+      resizeObs.disconnect();
       el.removeEventListener("pointerdown", down);
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
@@ -688,6 +717,9 @@ export default function MilkyWay() {
           Object.values(a.nodes).forEach((nn) => nn.dispose && nn.dispose());
         } catch (e) {}
       }
+      // the nodes are gone — make sure a remount (e.g. StrictMode) rebuilds them
+      audioRef.current = { on: false, nodes: null };
+      setSoundOn(false);
       scene.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
         if (o.material) o.material.dispose();
@@ -717,7 +749,7 @@ export default function MilkyWay() {
   });
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100vh", overflow: "hidden", background: "#020107", fontFamily: "'Helvetica Neue', Arial, sans-serif" }}>
+    <div style={{ position: "relative", width: "100%", height: "100dvh", overflow: "hidden", background: "#020107", fontFamily: "'Helvetica Neue', Arial, sans-serif" }}>
       <div ref={mountRef} style={{ position: "absolute", inset: 0 }} />
 
       <div ref={labelRef} style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", transition: "opacity 0.3s", color: "#ffe28a", fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
@@ -727,11 +759,11 @@ export default function MilkyWay() {
         </div>
       </div>
 
-      <div style={{ position: "absolute", top: 20, left: 20, color: "#e8e6f0", pointerEvents: "none" }}>
-        <div style={{ fontSize: 10, letterSpacing: "0.35em", textTransform: "uppercase", opacity: 0.55, marginBottom: 5 }}>
+      <div style={{ position: "absolute", top: 20, left: 20, maxWidth: narrow ? "calc(100% - 170px)" : "none", color: "#e8e6f0", pointerEvents: "none" }}>
+        <div style={{ fontSize: narrow ? 9 : 10, letterSpacing: narrow ? "0.2em" : "0.35em", lineHeight: 1.5, textTransform: "uppercase", opacity: 0.55, marginBottom: 5 }}>
           {inSky ? "View from the Sun · this is why it's 'milky'" : "Live model · flat rotation curve"}
         </div>
-        <div style={{ fontSize: 26, fontWeight: 200, letterSpacing: "0.18em", textTransform: "uppercase" }}>
+        <div style={{ fontSize: narrow ? 21 : 26, fontWeight: 200, letterSpacing: "0.18em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
           Milky Way
         </div>
       </div>
@@ -746,47 +778,50 @@ export default function MilkyWay() {
           onClick={() => viewRef.current && (inSky ? viewRef.current.exitSky() : viewRef.current.enterSky())}
           style={chipStyle(false, true)}
         >
-          {inSky ? "↩ Back to space" : "✦ Night sky — view from Earth"}
+          {inSky ? "↩ Back to space" : narrow ? "✦ Night sky" : "✦ Night sky — view from Earth"}
         </button>
         <button onClick={() => viewRef.current && viewRef.current.toggleSound()} style={chipStyle(soundOn)}>
           {soundOn ? "♪ Sound on" : "♪ Sound off"}
         </button>
       </div>
 
-      <div style={{ position: "absolute", right: 20, bottom: inSky ? 24 : 118, color: "#9a97ab", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", textAlign: "right" }}>
-        <div style={{ marginBottom: 4 }}>
-          Time · {myrPerSec === 0 ? "paused" : `≈ ${myrPerSec} Myr/s`}
-        </div>
-        <input
-          type="range" min="0" max="20" step="0.1" value={speedUi}
-          onChange={(e) => { const v = parseFloat(e.target.value); setSpeedUi(v); speedRef.current = v; }}
-          style={{ width: 150, accentColor: "#ffe28a" }}
-          aria-label="Time speed"
-        />
-        <div style={{ opacity: 0.55, marginTop: 2, fontSize: 9 }}>
-          {inSky ? "Crank it — watch the sky wheel" : "Crank it — supernovae & winding arms"}
+      {/* bottom row: info on the left, time dial on the right — wraps the dial above on narrow screens */}
+      <div style={{ position: "absolute", left: 20, right: 20, bottom: inSky ? 24 : 64, display: "flex", flexWrap: "wrap-reverse", alignItems: "flex-end", justifyContent: "space-between", gap: 12, pointerEvents: "none" }}>
+        {inSky && (
+          <div style={{ color: "#9a97ab", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", lineHeight: 1.9 }}>
+            Drag to look around · pinch to zoom
+            <br />
+            Find: the bright core · the dark rift · two faint clouds below the band
+          </div>
+        )}
+
+        {!inSky && poi && (
+          <div style={{ flex: "1 1 280px", maxWidth: 420, pointerEvents: "auto", background: "rgba(5,4,14,0.78)", border: "1px solid rgba(255,226,138,0.25)", borderRadius: 3, padding: "12px 14px", color: "#dcd9e8", backdropFilter: "blur(6px)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+              <div style={{ fontSize: 12, letterSpacing: "0.18em", textTransform: "uppercase", color: "#ffe28a" }}>{poi.name}</div>
+              <button onClick={() => viewRef.current && viewRef.current.home()} style={{ background: "none", border: "none", color: "#9a97ab", cursor: "pointer", fontSize: 11, letterSpacing: "0.1em" }}>
+                ✕ Back
+              </button>
+            </div>
+            <div style={{ fontSize: 12.5, lineHeight: 1.6, fontWeight: 300 }}>{poi.blurb}</div>
+          </div>
+        )}
+
+        <div style={{ marginLeft: "auto", pointerEvents: "auto", color: "#9a97ab", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", textAlign: "right" }}>
+          <div style={{ marginBottom: 4 }}>
+            Time · {myrPerSec === 0 ? "paused" : `≈ ${myrPerSec} Myr/s`}
+          </div>
+          <input
+            type="range" min="0" max="20" step="0.1" value={speedUi}
+            onChange={(e) => { const v = parseFloat(e.target.value); setSpeedUi(v); speedRef.current = v; }}
+            style={{ width: 150, accentColor: "#ffe28a" }}
+            aria-label="Time speed"
+          />
+          <div style={{ opacity: 0.55, marginTop: 2, fontSize: 9 }}>
+            {inSky ? "Crank it — watch the sky wheel" : "Crank it — supernovae & winding arms"}
+          </div>
         </div>
       </div>
-
-      {inSky && (
-        <div style={{ position: "absolute", left: 20, bottom: 24, color: "#9a97ab", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", lineHeight: 1.9, pointerEvents: "none" }}>
-          Drag to look around · pinch to zoom
-          <br />
-          Find: the bright core · the dark rift · two faint clouds below the band
-        </div>
-      )}
-
-      {!inSky && poi && (
-        <div style={{ position: "absolute", left: 20, right: 20, bottom: 64, maxWidth: 420, background: "rgba(5,4,14,0.78)", border: "1px solid rgba(255,226,138,0.25)", borderRadius: 3, padding: "12px 14px", color: "#dcd9e8", backdropFilter: "blur(6px)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
-            <div style={{ fontSize: 12, letterSpacing: "0.18em", textTransform: "uppercase", color: "#ffe28a" }}>{poi.name}</div>
-            <button onClick={() => viewRef.current && viewRef.current.home()} style={{ background: "none", border: "none", color: "#9a97ab", cursor: "pointer", fontSize: 11, letterSpacing: "0.1em" }}>
-              ✕ Back
-            </button>
-          </div>
-          <div style={{ fontSize: 12.5, lineHeight: 1.6, fontWeight: 300 }}>{poi.blurb}</div>
-        </div>
-      )}
 
       {!inSky && (
         <div style={{ position: "absolute", left: 0, right: 0, bottom: 16, display: "flex", gap: 8, overflowX: "auto", padding: "4px 20px", WebkitOverflowScrolling: "touch" }}>
